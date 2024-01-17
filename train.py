@@ -16,11 +16,16 @@ import datasets
 import net
 
 def train(model, train_loader, optimizer, num_devices):
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    model.to(device)
+
     model.train()
     model_losses = [0]*(num_devices + 1)
     for batch_idx, (data, target) in enumerate(tqdm(train_loader, leave=False)):
-        if torch.cuda.is_available():
-            data, target = data.cuda(), target.cuda()
+        data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
         optimizer.zero_grad()
         predictions = model(data)
@@ -48,7 +53,7 @@ def test(model, test_loader, num_devices):
     model_losses = [0]*(num_devices + 1)
     num_correct = [0]*(num_devices + 1)
     for data, target in tqdm(test_loader, leave=False):
-        data, target = data.cuda(), target.cuda()
+        data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
         predictions = model(data)
         for i, prediction in enumerate(predictions):
@@ -95,7 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='mnist', help='dataset name')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--output', default='models/model.pth',
+    parser.add_argument('--output', default='models/model_240117.pth',
                         help='output directory')
     args = parser.parse_args()
     args.cuda = torch.cuda.is_available()
@@ -106,10 +111,9 @@ if __name__ == '__main__':
 
     data = datasets.get_dataset(args.dataset_root, args.dataset, args.batch_size, args.cuda)
     train_dataset, train_loader, test_dataset, test_loader = data
-    x, _ = train_loader.__iter__().next()
+    x, _ = train_loader.__iter__().__next__()
     num_devices = x.shape[1]
     in_channels = x.shape[2]
     model = net.DDNN(in_channels, 10, num_devices)
-    if args.cuda:
-        model = model.cuda()
+    model = model.to()
     train_model(model, args.output, train_loader, test_loader, args.lr, args.epochs, num_devices)

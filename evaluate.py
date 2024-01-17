@@ -7,12 +7,18 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 
 def test_outage(model, test_loader, num_devices, outages):
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    model.to(device)
+
     model.eval()
     num_correct = 0
     for data, target in tqdm(test_loader, leave=False):
         for outage in outages:
             data[:, outage] = 0
-        data, target = data.cuda(), target.cuda()
+        data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
         predictions = model(data)
         cloud_pred = predictions[-1]
@@ -34,7 +40,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='mnist', help='dataset name')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--model_path', default='models/model.pth',
+    parser.add_argument('--model_path', default='C:\\Users\\Yuval\\Documents\\GitHub\\ddnn\\models\\mnist.pth',
                         help='output directory')
     args = parser.parse_args()
     args.cuda = torch.cuda.is_available()
@@ -45,10 +51,10 @@ if __name__ == '__main__':
 
     data = datasets.get_dataset(args.dataset_root, args.dataset, args.batch_size, args.cuda)
     train_dataset, train_loader, test_dataset, test_loader = data
-    x, _ = train_loader.__iter__().next()
+    x, _ = train_loader.__iter__().__next__()
     num_devices = x.shape[1]
     in_channels = x.shape[2]
-    model = torch.load(args.model_path)
+    model = torch.load(args.model_path, map_location=torch.device('cpu'))
     for i in range(num_devices):
         outages = [i]
         acc = test_outage(model, test_loader, num_devices, outages)
