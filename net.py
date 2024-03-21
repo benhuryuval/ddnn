@@ -83,18 +83,15 @@ class DDNN(nn.Module):
 
 
     def forward(self, x):
-    ###################################################################################
-        mu = [0, 0, 0, 0, 0, 0]                          # mean of the distribution,dimentions :[num_devices=6, 1]
-        std_dev = [1, 1, 1, 1, 1, 1]                     # square of variance of noise per device,dimentions :[num_devices=6, 1]
-        ##self.flag = 0
+        mu = [0, 0, 0, 0, 0, 0]                      # mean of the distribution,dimentions :[num_devices=6, 1]
+        std_dev = [1, 1, 1, 1, 1, 1]                 # square of variance of noise per device,dimentions :[num_devices=6, 1]
 
-        B = x.shape[0]                                   #get the first dimention of x, meaning: 32 (batch size)
+        B = x.shape[0]                               #get the first dimention of x, meaning: 32 (batch size)
         hs, predictions = [], []
         z_list = []
         for i, device_model in enumerate(self.device_models):
-            h, prediction = device_model(x[:, i])         # h is the device exit data, dimentions :[32, 16, 14, 9]
+            h, prediction = device_model(x[:, i])    # h is the device exit data, dimentions :[32, 16, 14, 9]
 
-            #z = np.concatenate((z.detach().numpy(), h.detach().numpy()), axis=1)
             #noise = torch.normal(mu[i], std_dev[i], h.size())  # create a tensor with gausian noises at the same dimentions as h                                           # prediction is the prediction per device, dimentions: [32, 10]
             #h = h + noise                                 # adding the noise to the device output data
 
@@ -108,20 +105,13 @@ class DDNN(nn.Module):
             hs.append(h)
             predictions.append(prediction)
 
-        z = np.concatenate(z_list, axis=1) # output of all 6 devices for a batch
+        z = np.concatenate(z_list, axis=1)           # output of all 6 devices for a batch - represent 32 rows in X matrix
 
-        z_mat = z.reshape(-1, z.shape[-1]) #2D
-
-        z_cov_matrix = z_mat @ z_mat.T
-        z_trace = np.trace(z_cov_matrix)
-        print(z_trace)
-    ##########################################################################################3
-
-        h = torch.cat(hs, dim=1) # concatenate the itens in hs to h, dimentions: [32, 96, 14, 9]
-        h = self.cloud_model(h)  # dimentions: [32, 128, 7, 4]
-        h = self.pool(h) # dimentions: [32, 128, 1, 1]
-        prediction = self.classifier(h.view(B, -1)) # dimentions: [32,10] ; h.view(B, -1) size: [32, 128]
-        predictions.append(prediction)              # add the cloud prediction as the last item of the array
+        h = torch.cat(hs, dim=1)                     # concatenate the itens in hs to h, dimentions: [32, 96, 14, 9]
+        h = self.cloud_model(h)                      # dimentions: [32, 128, 7, 4]
+        h = self.pool(h)                             # dimentions: [32, 128, 1, 1]
+        prediction = self.classifier(h.view(B, -1))  # dimentions: [32,10] ; h.view(B, -1) size: [32, 128]
+        predictions.append(prediction)               # add the cloud prediction as the last item of the array
 
         return predictions, z
 
