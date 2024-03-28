@@ -82,9 +82,9 @@ class DDNN(nn.Module):
         self.classifier = nn.Linear(128, out_channels) #out_channels = 10
 
 
-    def forward(self, x):
-        mu = [0, 0, 0, 0, 0, 0]                      # mean of the distribution,dimentions :[num_devices=6, 1]
-        std_dev = [1, 1, 1, 1, 1, 1]                 # square of variance of noise per device,dimentions :[num_devices=6, 1]
+    def forward(self, x, std):
+        #mu = [0, 0, 0, 0, 0, 0]                      # mean of the distribution,dimentions :[num_devices=6, 1]
+        #std_dev = [1, 1, 1, 1, 1, 1]                 # square of variance of noise per device,dimentions :[num_devices=6, 1]
 
         B = x.shape[0]                               #get the first dimention of x, meaning: 32 (batch size)
         hs, predictions = [], []
@@ -92,8 +92,8 @@ class DDNN(nn.Module):
         for i, device_model in enumerate(self.device_models):
             h, prediction = device_model(x[:, i])    # h is the device exit data, dimentions :[32, 16, 14, 9]
 
-            #noise = torch.normal(mu[i], std_dev[i], h.size())  # create a tensor with gausian noises at the same dimentions as h                                           # prediction is the prediction per device, dimentions: [32, 10]
-            #h = h + noise                                 # adding the noise to the device output data
+            noise = torch.normal(0, std, h.size())  # create a tensor with gausian noises at the same dimentions as h                                           # prediction is the prediction per device, dimentions: [32, 10]
+            h = h + noise                                 # adding the noise to the device output data
 
             # Convert h to NumPy array
             h_np = h.detach().numpy()
