@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import numpy as np
 
@@ -85,33 +86,41 @@ class DDNN(nn.Module):
     def forward(self, x, std):
         #mu = [0, 0, 0, 0, 0, 0]                      # mean of the distribution,dimentions :[num_devices=6, 1]
         #std_dev = [1, 1, 1, 1, 1, 1]                 # square of variance of noise per device,dimentions :[num_devices=6, 1]
+        alpha = [1, 1, 1, 1, 1, 1]
 
         B = x.shape[0]                               #get the first dimention of x, meaning: 32 (batch size)
         hs, predictions = [], []
         z_list = []
         for i, device_model in enumerate(self.device_models):
             h, prediction = device_model(x[:, i])    # h is the device exit data, dimentions :[32, 16, 14, 9]
-
-            noise = torch.normal(0, std, h.size())  # create a tensor with gausian noises at the same dimentions as h                                           # prediction is the prediction per device, dimentions: [32, 10]
-            h = h + noise                                 # adding the noise to the device output data
-
-            # Convert h to NumPy array
-            h_np = h.detach().numpy()
-
-            # Append h_np to the list
-            z_list.append(h_np)
-
+            '''if flag == 1:
+                print(f"device {i}:")
+                print(prediction[0])'''
+            noise = torch.normal(0, std, prediction.size())  # create a tensor with gausian noises at the same dimentions as prediction                                           # prediction is the prediction per device, dimentions: [32, 10]
+            prediction = prediction + noise                  # adding the noise to the device output data
 
             hs.append(h)
             predictions.append(prediction)
+            z_list.append(prediction.detach().numpy())
 
-        z = np.concatenate(z_list, axis=1)           # output of all 6 devices for a batch - represent 32 rows in X matrix
+        z = np.concatenate(z_list, axis=1)  # output of all 6 devices for a batch - represent 32 rows in X matrix
+
+        # Convert predictions to a tensor and exclude cloud prediction
+        device_predictions = torch.stack(predictions)  # Shape: [num_devices, B, out_channels]
+
+        # Calculate mean across device predictions
+        avg_predictions = torch.mean(device_predictions, dim=0)  # Mean across devices, Shape: [B, out_channels]
+
+        # Apply softmax to avg_predictions along the last dimension
+        probabilities = F.softmax(avg_predictions, dim=1)  # Shape: [B, out_channels]
 
         h = torch.cat(hs, dim=1)                     # concatenate the itens in hs to h, dimentions: [32, 96, 14, 9]
         h = self.cloud_model(h)                      # dimentions: [32, 128, 7, 4]
         h = self.pool(h)                             # dimentions: [32, 128, 1, 1]
         prediction = self.classifier(h.view(B, -1))  # dimentions: [32,10] ; h.view(B, -1) size: [32, 128]
         predictions.append(prediction)               # add the cloud prediction as the last item of the array
+
+        predictions.append(probabilities)
 
         return predictions, z
 

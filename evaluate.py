@@ -19,35 +19,41 @@ def test_outage(model, test_loader, num_devices, outages, std):
 
     model.eval()
     num_correct = 0
-
     r = []
-    for data, target in tqdm(test_loader, leave=False): #target dimentions: [32], where 32 is the batch size
+    for data, target in tqdm(test_loader, leave=False): #target dimentions(represents the ground-truth label): [32], where 32 is the batch size
         for outage in outages:
             data[:, outage] = 0
         data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
+
+        '''if flag == 0:
+            predictions = model(data, std, 0)
+        if flag == 1:
+            predictions = model(data, std, 1)
+            print("targets:")
+            print(target)
+            flag = 0'''
+
         predictions, z = model(data, std)
         r.append(z)
-        cloud_pred = predictions[-1] # dimentions: [32,10] represent the 32 samples, where to each one there's an array of probability(?) to be in the i-th class
-        loss = F.cross_entropy(cloud_pred, target, size_average=False).item()
 
-        pred = cloud_pred.data.max(1, keepdim=True)[1] #dimentions: [32, 1] represent the class chosen by the cloud with max probabilty
-        correct = (pred.view(-1) == target.view(-1)).long().sum().item()
+        local_pred = predictions[-1] # dimentions: [32,10] represent the 32 samples, where to each one there's an array of probability(?) to be in the i-th class
+        loss = F.cross_entropy(local_pred, target, size_average=False).item()
+
+        local_pred = local_pred.data.max(1, keepdim=True)[1] #dimentions: [32, 1] represent the class chosen by the cloud with max probabilty
+        correct = (local_pred.view(-1) == target.view(-1)).long().sum().item()
         num_correct += correct
 
     ##########################################################################################################333
+    '''
+    X = np.concatenate(r, axis=0) #[N~9984, 6*10]
 
-    X = np.concatenate(r, axis=0) #(9984, 96, 14, 9)
-
-    '''dim1 = int(X.shape[1] / 6)  # 16
-    dim2 = X.shape[2] # 14
-    dim3 = X.shape[3] # 9
+    dim1 = int(X.shape[1] / 6)  #
     for i in range(dim1):
-        for j in range(dim2):
-            for k in range(dim3):
-                cov_of_feature(i,j,k,X)'''
+        cov_of_feature(i, X)
 
-    #hisogram()
+    hisogram()
+    '''
 
     N = len(test_loader.dataset) # N = 10,000, number of iterations in the above loop: 312 (which is N/batch_size)
 
@@ -55,23 +61,23 @@ def test_outage(model, test_loader, num_devices, outages, std):
 
 #########################################################################################################
 
-def cov_of_feature(i, j, k, X): #to calculate the X_ijk of a specific feature (i,j,k) and then X_ijk.T @ X_ijk = Cov_ijk
+def cov_of_feature(i, X): #to calculate the X_i of a specific feature (i) and then X_i.T @ X_i = Cov_i
     N = X.shape[0] #Number of samples
     dim = int(X.shape[1] / 6) #16 - which is the length to "jump" between devices in the matrix X, united from h1, ... , h6
     matrix = np.zeros((N, 6))
     for r in range(N):
         for t in range(6):
-            matrix[r][t] = X[r][i + dim * t][j][k]
+            matrix[r][t] = X[r][i + dim * t]
     cov = (matrix.T @ matrix) / N
     trc = np.trace(cov)
     #return trc
 
-    data = [[i, j, k, trc]]
+    data = [[i, trc]]
     # Convert the matrix to a Pandas DataFrame
     df = pd.DataFrame(data)
 
     # Specify the CSV file path
-    csv_file_path = 'trc.csv'
+    csv_file_path = 'trc_local.csv'
 
     # Write the DataFrame to a CSV file
     df.to_csv(csv_file_path, mode='a', index=False, header=False)
@@ -80,10 +86,10 @@ def cov_of_feature(i, j, k, X): #to calculate the X_ijk of a specific feature (i
 
 def hisogram():
     # Read the data from the CSV file
-    df = pd.read_csv('trc.csv', header=None)
+    df = pd.read_csv('trc_local.csv', header=None)
 
     # Extract the data from the fourth column
-    traces = df.iloc[:, 3]  # Assuming the index of the fourth column is 3
+    traces = df.iloc[:, 1]  # Assuming the index of the fourth column is 1
 
     # Plot the histogram
     plt.hist(traces, bins=100)  # Adjust the number of bins as needed
@@ -105,7 +111,7 @@ def hisogram():
     print("Average of the trace of covariance features matrixs:", average) # mnist average : 36.946195351075666
 
     # Write average to a text file
-    with open("avg.txt", "w") as f:
+    with open("avg_local.txt", "w") as f:
         f.write(f"Average of the traces: {average}\n")
 
 ########################################################################################################
@@ -114,7 +120,7 @@ def create_snr_graph():
     values = [0.001, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
 
     for index, snr in enumerate(values):
-        std = np.sqrt(36.946195351075666 / (6*snr)) # std
+        std = np.sqrt(112.82436884928032 / (6*snr)) # std
         acc = test_outage(model, test_loader, num_devices, outages, std)
         print('SNR = {:.4f}, ACC = {:.4f}'.format(snr, acc))
         data = [[snr, acc]]
@@ -122,7 +128,7 @@ def create_snr_graph():
         df = pd.DataFrame(data)
 
         # Specify the CSV file path
-        csv_file_path = 'snr_acc.csv'
+        csv_file_path = 'snr_acc_local.csv'
 
         # Write the DataFrame to a CSV file
         df.to_csv(csv_file_path, mode='a', index=False, header=False)
@@ -130,7 +136,7 @@ def create_snr_graph():
     # Make it a graph:
 
     # Load the data from CSV file
-    data = pd.read_csv("snr_acc.csv", header=None, names=['snr', 'acc'])
+    data = pd.read_csv("snr_acc_local.csv", header=None, names=['snr', 'acc'])
 
     # Extract SNR and ACC values
     snr = data['snr']
@@ -184,17 +190,6 @@ if __name__ == '__main__':
     num_devices = x.shape[1]
     in_channels = x.shape[2]
     model = torch.load(args.model_path, map_location=torch.device('cpu'))
-    '''
-    for i in range(num_devices):
-        outages = [i]
-        acc = test_outage(model, test_loader, num_devices, outages)
-        print('Missing Device(s) {}: {:.4f}'.format(outages, acc))
-
-    for i in range(1, num_devices + 1):
-        outages = list(range(i, num_devices))
-        acc = test_outage(model, test_loader, num_devices, outages)
-        print('Missing Device(s) {}: {:.4f}'.format(outages, acc))
-    '''
 
     outages = [] # All devices included
     create_snr_graph()
