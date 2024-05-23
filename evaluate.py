@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def test_outage(model, test_loader, num_devices, outages, std):
+def test_outage(model, test_loader, num_devices, outages, std, isGlobalExit, isAvgAgg):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
@@ -20,34 +20,33 @@ def test_outage(model, test_loader, num_devices, outages, std):
     model.eval()
     num_correct = 0
 
-    r = []
     for data, target in tqdm(test_loader, leave=False): #target dimentions: [32], where 32 is the batch size
         for outage in outages:
             data[:, outage] = 0
         data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
-        predictions, z = model(data, std)
-        r.append(z)
-        cloud_pred = predictions[-1] # dimentions: [32,10] represent the 32 samples, where to each one there's an array of probability(?) to be in the i-th class
-        loss = F.cross_entropy(cloud_pred, target, size_average=False).item()
+        predictions = model(data, std, isGlobalExit, isAvgAgg)
 
-        pred = cloud_pred.data.max(1, keepdim=True)[1] #dimentions: [32, 1] represent the class chosen by the cloud with max probabilty
+        last_pred = predictions[-1] # dimentions: [32,10] represent the 32 samples, where to each one there's an array of probability(?) to be in the i-th class
+        loss = F.cross_entropy(last_pred, target, size_average=False).item()
+
+        pred = last_pred.data.max(1, keepdim=True)[1] #dimentions: [32, 1] represent the class chosen by the cloud with max probabilty
         correct = (pred.view(-1) == target.view(-1)).long().sum().item()
         num_correct += correct
 
     ##########################################################################################################333
 
-    X = np.concatenate(r, axis=0) #(9984, 96, 14, 9)
+    '''X = np.concatenate(r, axis=0) #(9984, 96, 14, 9)
 
-    '''dim1 = int(X.shape[1] / 6)  # 16
+    dim1 = int(X.shape[1] / 6)  # 16
     dim2 = X.shape[2] # 14
     dim3 = X.shape[3] # 9
     for i in range(dim1):
         for j in range(dim2):
             for k in range(dim3):
-                cov_of_feature(i,j,k,X)'''
+                cov_of_feature(i,j,k,X)
 
-    #hisogram()
+    #hisogram()'''
 
     N = len(test_loader.dataset) # N = 10,000, number of iterations in the above loop: 312 (which is N/batch_size)
 
@@ -110,27 +109,37 @@ def hisogram():
 
 ########################################################################################################
 
-def create_snr_graph():
-    values = [0.001, 0.02, 0.04, 0.06, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2]
+def create_snr_graph(isGlobalExit, isAvgAgg, first_sample, last_sample, num_samples):
+    values = np.linspace(first_sample, last_sample, num_samples)
+    #values = [0.001,1,2,3,4,5,6,7,8,9,10]
 
     for index, snr in enumerate(values):
-        std = np.sqrt(36.946195351075666 / (6*snr)) # std
-        acc = test_outage(model, test_loader, num_devices, outages, std)
+        if isGlobalExit == 1: #global exit
+            std = np.sqrt(36.946195351075666 / (6*snr)) # std
+        if isGlobalExit == 0: #local exit
+            std = np.sqrt(112.82436884928032 / (6 * snr))  # std
+        acc = test_outage(model, test_loader, num_devices, outages, std, isGlobalExit, isAvgAgg)
         print('SNR = {:.4f}, ACC = {:.4f}'.format(snr, acc))
         data = [[snr, acc]]
         # Convert the matrix to a Pandas DataFrame
         df = pd.DataFrame(data)
 
         # Specify the CSV file path
-        csv_file_path = 'snr_acc.csv'
+        if isGlobalExit == 1: #global
+            csv_file_path = 'global_results.csv'
+        else:
+            if isAvgAgg == 1: #AVG
+                csv_file_path = 'local_avg_results.csv'
+            if isAvgAgg == 0: #MAX
+                csv_file_path = 'local_max_results.csv'
 
         # Write the DataFrame to a CSV file
         df.to_csv(csv_file_path, mode='a', index=False, header=False)
-
+    '''
     # Make it a graph:
 
     # Load the data from CSV file
-    data = pd.read_csv("snr_acc.csv", header=None, names=['snr', 'acc'])
+    data = pd.read_csv(csv_file_path, header=None, names=['snr', 'acc'])
 
     # Extract SNR and ACC values
     snr = data['snr']
@@ -156,15 +165,15 @@ def create_snr_graph():
     plt.xticks(x_ticks)
     plt.yticks(y_ticks)
 
-    plt.show()
+    plt.show()'''
 
 ########################################################################################################
 
-def present_all_snr_graphs():
+def present_all_snr_graphs(first_sample, last_sample, num_samples):
     # Load the data from three CSV files
-    data1 = pd.read_csv("MAX_snr_acc_local_.csv", header=None, names=['snr', 'acc'])
-    data2 = pd.read_csv("AVG_snr_acc_local.csv", header=None, names=['snr', 'acc'])
-    data3 = pd.read_csv("snr_global2.csv", header=None, names=['snr', 'acc'])
+    data1 = pd.read_csv("local_max_results.csv", header=None, names=['snr', 'acc'])
+    data2 = pd.read_csv("local_avg_results.csv", header=None, names=['snr', 'acc'])
+    data3 = pd.read_csv("global_results.csv", header=None, names=['snr', 'acc'])
 
     # Extract SNR and ACC values
     snr1, acc1 = data1['snr'], data1['acc']
@@ -187,11 +196,11 @@ def present_all_snr_graphs():
     plt.legend()
 
     # Set the number of ticks
-    num_ticks_x = 9
+    num_ticks_x = num_samples
     num_ticks_y = 11
 
     # Generate evenly spaced ticks for x-axis and y-axis
-    x_ticks = np.linspace(0, 0.2, num_ticks_x)
+    x_ticks = np.linspace(0, last_sample, num_ticks_x)
     y_ticks = np.linspace(0, 100, num_ticks_y)
 
     # Set the ticks on x-axis and y-axis
@@ -240,5 +249,13 @@ if __name__ == '__main__':
     '''
 
     outages = [] # All devices included
-    #create_snr_graph()
-    present_all_snr_graphs()
+
+    ################################################ RUN ##############################################################3
+    first_sample = 0.001
+    last_sample = 10
+    num_samples = 11
+
+    create_snr_graph(1, 0, first_sample, last_sample, num_samples) # global
+    create_snr_graph(0, 1, first_sample, last_sample, num_samples) # local - avg
+    create_snr_graph(0, 0, first_sample, last_sample, num_samples) # local - max
+    present_all_snr_graphs(first_sample, last_sample, num_samples)
