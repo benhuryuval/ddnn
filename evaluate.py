@@ -1,5 +1,8 @@
 import argparse
 import torch
+import csv
+from collections import defaultdict
+
 from tqdm import tqdm
 
 import datasets
@@ -8,254 +11,233 @@ import torch.nn.functional as F
 
 import numpy as np
 import pandas as pd
+import os
 import matplotlib.pyplot as plt
 
-def test_outage(model, test_loader, num_devices, outages, std, isGlobalExit, isAvgAgg):
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    model.to(device)
+from grad_descent import get_optimal_alpha
+from model_settings import define_settings
+from visual_tools import plot_snr_graphs, plot_coefficients
 
-    model.eval()
-    num_correct = 0
+def test_model(model, test_loader, sigma, exit, alpha):
+    """
+        Test the performance of the given model with specific noise covariance (sigma), exit strategy, and aggregation weights (alpha).
 
-    for data, target in tqdm(test_loader, leave=False): #target dimentions: [32], where 32 is the batch size
-        for outage in outages:
-            data[:, outage] = 0
+        Parameters:
+        - model: PyTorch model to be evaluated.
+        - test_loader: PyTorch DataLoader providing the test dataset.
+        - sigma: Noise covariance matrix to be applied to the model during inference.
+        - exit: Specifies which part of the model to use for early exit or final exit.
+        - alpha: Aggregation weights used by the model for the evaluation (can be optimal, equal, or random depending on the method).
+
+        Returns:
+        - Accuracy (float): The accuracy of the model on the test dataset, expressed as a percentage.
+
+        Usage Example:
+        -     model, test_loader, num_devices = define_settings(dataset)
+        acc = test_model(model, test_loader, sigma=np.diag([1, 1, 1, 1, 1, 1]), exit="local", alpha=np.ones(num_devices))
+    """
+
+    model.eval()  # Set the model to evaluation mode
+    num_correct = 0  # Counter for correct predictions
+
+    # Iterate over the test data
+    for data, target in tqdm(test_loader, leave=False):
+
+        # Transfer data and target labels to the computation device
         data, target = data.to(), target.to()
         data, target = Variable(data), Variable(target)
-        predictions = model(data, std, isGlobalExit, isAvgAgg)
 
-        last_pred = predictions[-1] # dimentions: [32,10] represent the 32 samples, where to each one there's an array of probability(?) to be in the i-th class
+        # Perform inference with the model using the given sigma, exit, and alpha
+        predictions = model(data, sigma, exit, alpha)
+
+        # Use the last prediction (output) for final classification
+        last_pred = predictions[-1]  # Dimensions: [batch_size, num_classes], e.g., [32, 10]
+
+        # Compute the loss (optional step; it's used for model evaluation but not returned)
         loss = F.cross_entropy(last_pred, target, size_average=False).item()
 
-        pred = last_pred.data.max(1, keepdim=True)[1] #dimentions: [32, 1] represent the class chosen by the cloud with max probabilty
+        # Get the predicted class with the highest probability
+        pred = last_pred.data.max(1, keepdim=True)[1]  # Dimensions: [batch_size, 1]
+
+        # Compare predictions to the ground truth and count the correct ones
         correct = (pred.view(-1) == target.view(-1)).long().sum().item()
-        num_correct += correct
+        num_correct += correct  # Accumulate correct predictions
 
-    ##########################################################################################################333
-
-    '''X = np.concatenate(r, axis=0) #(9984, 96, 14, 9)
-
-    dim1 = int(X.shape[1] / 6)  # 16
-    dim2 = X.shape[2] # 14
-    dim3 = X.shape[3] # 9
-    for i in range(dim1):
-        for j in range(dim2):
-            for k in range(dim3):
-                cov_of_feature(i,j,k,X)
-
-    #hisogram()'''
-
-    N = len(test_loader.dataset) # N = 10,000, number of iterations in the above loop: 312 (which is N/batch_size)
-
+    # Calculate and return the accuracy as a percentage
+    N = len(test_loader.dataset)  # Total number of samples in the test dataset
     return 100. * (num_correct / N)
 
-#########################################################################################################
 
-def cov_of_feature(i, j, k, X): #to calculate the X_ijk of a specific feature (i,j,k) and then X_ijk.T @ X_ijk = Cov_ijk
-    N = X.shape[0] #Number of samples
-    dim = int(X.shape[1] / 6) #16 - which is the length to "jump" between devices in the matrix X, united from h1, ... , h6
-    matrix = np.zeros((N, 6))
-    for r in range(N):
-        for t in range(6):
-            matrix[r][t] = X[r][i + dim * t][j][k]
-    cov = (matrix.T @ matrix) / N
-    trc = np.trace(cov)
-    #return trc
 
-    data = [[i, j, k, trc]]
-    # Convert the matrix to a Pandas DataFrame
-    df = pd.DataFrame(data)
+def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out_filepath_csv, plot_graph="yes", snr_values=None):
+    """
+    Evaluate the performance of a model across different SNR values, using various aggregation strategies for alpha.
+    The function writes the accuracy and normalized alpha values (if applicable) to separate CSV files.
 
-    # Specify the CSV file path
-    csv_file_path = 'trc.csv'
+    Parameters:
+    - exit: str, Specifies which part of the model to use for early exit or final exit ('global' or 'local').
+    - dataset: str, The dataset being evaluated ('mnist' or 'cifar').
+    - alpha_agg_method: str, Method for computing the alpha values. Can be 'optimal', 'equal', or 'random'.
+    - noise_cov_mat: np.array, The noise covariance matrix to apply to the model during inference.
+    - out_filepath_csv: str, The file path where the accuracy results will be stored. A separate file will be created for alpha values.
+    - plot_graph: str, Indicates whether to plot the graph of the results ('yes' or 'no').
+    - snr_values: list or None, Optional list of SNR values. If None, defaults to predefined values based on the dataset.
 
-    # Write the DataFrame to a CSV file
-    df.to_csv(csv_file_path, mode='a', index=False, header=False)
+    Returns:
+    - None. The function writes to CSV files and prints the model's accuracy at each SNR value.
 
-############################################################################################################
+    Usage Example:
+    - evaluate_snr_performance(exit='local', dataset='mnist', alpha_agg_method='optimal',
+                             noise_cov_mat=np.diag([1, 1, 1, 1, 1, 1]),
+                             out_filepath_csv='local_mnist_optimal_noise1.csv')
+    - evaluate_snr_performance(exit="local", dataset="cifar", alpha_agg_method="optimal",
+                noise_cov_mat=np.diag([1, 1, 1, 10, 10, 10]), out_filepath_csv="local_cifar_optimal_noise2.csv")
+    """
+    # Define constants for cxx values
+    cxx_global_mnist = 36.946195351075666
+    cxx_local_mnist = 112.82436884928032
+    cxx_local_cifar = 32.9801139938582
 
-def hisogram():
-    # Read the data from the CSV file
-    df = pd.read_csv('trc.csv', header=None)
+    # default SNR values
+    if snr_values is None:
+        if dataset == "mnist":
+            snr_values = [0.001, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2]
+        elif dataset == "cifar":
+            snr_values = [0.001, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3]
 
-    # Extract the data from the fourth column
-    traces = df.iloc[:, 3]  # Assuming the index of the fourth column is 3
+    alpha = []
+    model, test_loader, num_devices = define_settings(dataset)
 
-    # Plot the histogram
-    plt.hist(traces, bins=100)  # Adjust the number of bins as needed
-    plt.xlabel('Trace Value')
-    plt.ylabel('Number of features')
-    plt.title('Histogram of the number of features against their covariance matrix trace value')
-    plt.show()
+    # Create a CSV file for alphas
+    alpha_filepath_csv = out_filepath_csv.replace(".csv", "_alphas.csv")
 
-    # Remove NaN values if any
-    traces = traces.dropna()
+    if alpha_agg_method == "equal":
+        alpha = np.ones(num_devices)  # Equal weights for all devices
+    elif alpha_agg_method == "random":
+        alpha = np.random.rand(num_devices)  # Random numbers between 0 and 1 for each device
 
-    # Calculate the average using pandas
-    average = traces.mean()
+    for index, snr in enumerate(snr_values):
+        if exit == "global" and dataset == "mnist":
+            cxx = cxx_global_mnist
+        if exit == "local" and dataset == "mnist":
+            cxx = cxx_local_mnist
+        if exit == "local" and dataset == "cifar":
+            cxx = cxx_local_cifar
 
-    # Sanity check
-    num_rows = len(traces)
-    print("Number of rows extracted:", num_rows)
+        sigma = noise_cov_mat * (cxx / (snr * np.trace(noise_cov_mat)))
 
-    print("Average of the trace of covariance features matrixs:", average) # mnist average : 36.946195351075666
+        # Determine alpha based on aggregation strategy
+        if alpha_agg_method == "optimal":
+            alpha = get_optimal_alpha(sigma, dataset)  # Optimal alpha based on std
+            # Normalize alphas
+            normalized_alpha = alpha / np.sum(alpha)  # Normalize to sum to 1
+            # Write normalized alpha to the CSV file
+            with open(alpha_filepath_csv, mode='a') as f:
+                f.write(','.join(map(str, normalized_alpha)) + '\n')
 
-    # Write average to a text file
-    with open("avg.txt", "w") as f:
-        f.write(f"Average of the traces: {average}\n")
 
-########################################################################################################
-
-def create_snr_graph(isGlobalExit, isAvgAgg, first_sample, last_sample, num_samples):
-    values = np.linspace(first_sample, last_sample, num_samples)
-    #values = [0.001,1,2,3,4,5,6,7,8,9,10]
-
-    for index, snr in enumerate(values):
-        if isGlobalExit == 1: #global exit
-            std = np.sqrt(36.946195351075666 / (6*snr)) # std
-        if isGlobalExit == 0: #local exit
-            std = np.sqrt(112.82436884928032 / (6 * snr))  # std
-        acc = test_outage(model, test_loader, num_devices, outages, std, isGlobalExit, isAvgAgg)
+        acc = test_model(model, test_loader, sigma, exit, alpha)
         print('SNR = {:.4f}, ACC = {:.4f}'.format(snr, acc))
         data = [[snr, acc]]
         # Convert the matrix to a Pandas DataFrame
         df = pd.DataFrame(data)
 
-        # Specify the CSV file path
-        if isGlobalExit == 1: #global
-            csv_file_path = 'global_results.csv'
-        else:
-            if isAvgAgg == 1: #AVG
-                csv_file_path = 'local_avg_results.csv'
-            if isAvgAgg == 0: #MAX
-                csv_file_path = 'local_max_results.csv'
-
         # Write the DataFrame to a CSV file
-        df.to_csv(csv_file_path, mode='a', index=False, header=False)
-    '''
+        df.to_csv(out_filepath_csv, mode='a', index=False, header=False)
+
     # Make it a graph:
+    if plot_graph == "yes":
+        plot_snr_graphs(title="SNR vs ACC", filepath1=out_filepath_csv, label1="")
 
-    # Load the data from CSV file
-    data = pd.read_csv(csv_file_path, header=None, names=['snr', 'acc'])
 
-    # Extract SNR and ACC values
-    snr = data['snr']
-    acc = data['acc']
+def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv, num_iterations, out_filepath_prefix):
+    """
+    Evaluate the performance of a model across different SNR values using random weights for alpha.
+    The function saves the maximum accuracy, average accuracy, and the count of iterations exceeding
+    the accuracy from a comparison CSV file for each SNR value.
 
-    # Plot the data
-    plt.figure(figsize=(10, 6))
-    plt.plot(snr, acc, marker='o', linestyle='-')
-    plt.title('SNR vs Accuracy')
-    plt.xlabel('SNR')
-    plt.ylabel('Accuracy')
-    plt.grid(True)
+    Parameters:
+    - exit: str, Specifies which part of the model to use for early exit or final exit ('global' or 'local').
+    - dataset: str, The dataset being evaluated ('mnist' or 'cifar').
+    - noise_cov_mat: np.array, The noise covariance matrix to apply to the model during inference.
+    - compare_performance_csv: str, The file path of the CSV to compare results against.
+    - num_iterations: int, The number of iterations to perform.
+    - out_filepath_prefix: str, The prefix for output CSV files (without extension).
 
-    # Set the number of ticks
-    num_ticks_x = 9
-    num_ticks_y = 11
+    Returns:
+    - None. The function writes to CSV files containing the performance statistics.
 
-    # Generate evenly spaced ticks for x-axis and y-axis
-    x_ticks = np.linspace(0, 0.2, num_ticks_y)
-    y_ticks = np.linspace(0, 100, num_ticks_y)
+    Usage Example:
+    -     simulate_random_alphas(exit="local", dataset="cifar", noise_cov_mat=np.diag([1, 1, 1, 10, 10, 10]),
+                           compare_performance_csv="local_cifar_optimal_noise2.csv",
+                           num_iterations=100, out_filepath_prefix="local_cifar_random100_noise2")
+    """
+    # SNR values (same as in the original function)
+    snr_values = []
+    if dataset == "mnist":
+        snr_values = [0.001, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2]
+    elif dataset == "cifar":
+        snr_values = [0.001, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3]
 
-    # Set the ticks on x-axis and y-axis
-    plt.xticks(x_ticks)
-    plt.yticks(y_ticks)
+    max_accuracy = {snr: float('-inf') for snr in snr_values}
+    accuracy_records = {snr: [] for snr in snr_values}
+    exceed_count = {snr: 0 for snr in snr_values}
 
-    plt.show()'''
+    # Load the comparison performance data
+    comparison_data = pd.read_csv(compare_performance_csv, header=None)
+    comparison_accuracies = dict(zip(comparison_data[0], comparison_data[1]))
 
-########################################################################################################
+    for i in range(num_iterations):
+        print(f"Iteration: {i+1}")  # Print the current iteration number
 
-def present_all_snr_graphs(first_sample, last_sample, num_samples):
-    # Load the data from three CSV files
-    data1 = pd.read_csv("local_max_results.csv", header=None, names=['snr', 'acc'])
-    data2 = pd.read_csv("local_avg_results.csv", header=None, names=['snr', 'acc'])
-    data3 = pd.read_csv("global_results.csv", header=None, names=['snr', 'acc'])
+        # Run evaluate_snr_performance with alpha_agg_method="random" and plot_graph="no"
+        out_filepath_csv = f"{out_filepath_prefix}_{i}.csv"  # Unique CSV for each iteration
+        evaluate_snr_performance(exit, dataset, "random", noise_cov_mat, out_filepath_csv, plot_graph="no")
 
-    # Extract SNR and ACC values
-    snr1, acc1 = data1['snr'], data1['acc']
-    snr2, acc2 = data2['snr'], data2['acc']
-    snr3, acc3 = data3['snr'], data3['acc']
+        # Read the results from the output CSV file
+        results = pd.read_csv(out_filepath_csv, header=None)
+        for _, row in results.iterrows():
+            snr, acc = row[0], row[1]
 
-    # Plot the data on the same axis
-    plt.figure(figsize=(10, 6))
-    plt.plot(snr1, acc1, marker='o', linestyle='-', color='b', label='Local - Max')
-    plt.plot(snr2, acc2, marker='s', linestyle='-', color='g', label='Local - Avg')
-    plt.plot(snr3, acc3, marker='^', linestyle='-', color='r', label='Global')
+            # Update maximum accuracy
+            if acc > max_accuracy[snr]:
+                max_accuracy[snr] = acc
 
-    # Add title and labels
-    plt.title('SNR vs Accuracy')
-    plt.xlabel('SNR')
-    plt.ylabel('Accuracy')
-    plt.grid(True)
+            # Store accuracy for averaging later
+            accuracy_records[snr].append(acc)
 
-    # Add legend
-    plt.legend()
+        # After processing, delete the CSV file
+        if os.path.exists(out_filepath_csv):
+            os.remove(out_filepath_csv)
 
-    # Set the number of ticks
-    num_ticks_x = num_samples
-    num_ticks_y = 11
+    # Calculate average accuracy and exceed counts
+    average_accuracy = {snr: np.mean(accuracy_records[snr]) if accuracy_records[snr] else 0 for snr in snr_values}
 
-    # Generate evenly spaced ticks for x-axis and y-axis
-    x_ticks = np.linspace(0, last_sample, num_ticks_x)
-    y_ticks = np.linspace(0, 100, num_ticks_y)
+    for snr in snr_values:
+        # Count how many iterations exceeded the comparison accuracy
+        if snr in comparison_accuracies:
+            exceed_count[snr] = sum(acc > comparison_accuracies[snr] for acc in accuracy_records[snr])
 
-    # Set the ticks on x-axis and y-axis
-    plt.xticks(x_ticks)
-    plt.yticks(y_ticks)
+    # Save the results to CSV files
+    max_acc_filepath = out_filepath_prefix + "_max_accuracy.csv"
+    avg_acc_filepath = out_filepath_prefix + "_average_accuracy.csv"
+    exceed_count_filepath = out_filepath_prefix + "_exceed_count.csv"
 
-    # Show the plot
-    plt.show()
+    # Save max accuracy
+    pd.DataFrame(max_accuracy.items(), columns=['SNR', 'Max Accuracy']).to_csv(max_acc_filepath, index=False)
+    # Save average accuracy
+    pd.DataFrame(average_accuracy.items(), columns=['SNR', 'Average Accuracy']).to_csv(avg_acc_filepath, index=False)
+    # Save exceed count
+    pd.DataFrame(exceed_count.items(), columns=['SNR', 'Exceed Count']).to_csv(exceed_count_filepath, index=False)
+
+    print(f"Results saved to {max_acc_filepath}, {avg_acc_filepath}, and {exceed_count_filepath}.")
+
 
 
 
 if __name__ == '__main__':
-    # Training settings
-    parser = argparse.ArgumentParser(description='DDNN Evaluation')
-    parser.add_argument('--dataset-root', default='datasets/', help='dataset root folder')
-    parser.add_argument('--batch-size', type=int, default=32, metavar='N',
-                        help='input batch size for training (default: 64)')
-    parser.add_argument('--dataset', default='mnist', help='dataset name')
-    parser.add_argument('--seed', type=int, default=1, metavar='S',
-                        help='random seed (default: 1)')
-    parser.add_argument('--model_path', default='C:\\Users\\Yuval\\Documents\\GitHub\\ddnn\\models\\mnist.pth',
-                        help='output directory')
-    args = parser.parse_args()
-    args.cuda = torch.cuda.is_available()
 
-    torch.manual_seed(args.seed)
-    if args.cuda:
-        torch.cuda.manual_seed(args.seed)
+    model, test_loader, num_devices = define_settings(dataset="mnist")
+    acc = test_model(model, test_loader, sigma=np.diag([1, 1, 1, 1, 1, 1]), exit="local", alpha=np.ones(num_devices))
+    print(acc)
 
-    data = datasets.get_dataset(args.dataset_root, args.dataset, args.batch_size, args.cuda)
-    train_dataset, train_loader, test_dataset, test_loader = data
-    x, _ = train_loader.__iter__().__next__()
-    num_devices = x.shape[1]
-    in_channels = x.shape[2]
-    model = torch.load(args.model_path, map_location=torch.device('cpu'))
-    '''
-    for i in range(num_devices):
-        outages = [i]
-        acc = test_outage(model, test_loader, num_devices, outages)
-        print('Missing Device(s) {}: {:.4f}'.format(outages, acc))
-
-    for i in range(1, num_devices + 1):
-        outages = list(range(i, num_devices))
-        acc = test_outage(model, test_loader, num_devices, outages)
-        print('Missing Device(s) {}: {:.4f}'.format(outages, acc))
-    '''
-
-    outages = [] # All devices included
-
-    ################################################ RUN ##############################################################3
-    first_sample = 0.001
-    last_sample = 10
-    num_samples = 11
-
-    create_snr_graph(1, 0, first_sample, last_sample, num_samples) # global
-    create_snr_graph(0, 1, first_sample, last_sample, num_samples) # local - avg
-    create_snr_graph(0, 0, first_sample, last_sample, num_samples) # local - max
-    present_all_snr_graphs(first_sample, last_sample, num_samples)

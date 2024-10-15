@@ -2,10 +2,13 @@
 from __future__ import print_function
 
 import torch
+
+
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
+
+
 
 def _layer(in_channels, out_channels, activation=True):
     if activation:
@@ -82,64 +85,112 @@ class DDNN(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Linear(128, out_channels) #out_channels = 10
 
+    def forward(self, x, sigma, exit, alpha):
+        """
+            Forward pass for device and cloud models with noise injection based on the device-specific variance.
 
-    def forward(self, x, std, isGlobalExit, isAvgAgg):
+            Args:
+                x (torch.Tensor): Input data with shape [B, num_devices, channels, height, width].
+                sigma (torch.Tensor): Covariance matrix for noise injection, shape [num_devices, num_devices].
+                exit (str): Specifies whether to use "global" or "local" exit.
+                alpha (list or torch.Tensor): Weights for weighted aggregation of device predictions.
 
-        B = x.shape[0]                               #get the first dimention of x, meaning: 32 (batch size)
+            Returns:
+                list: Predictions for each device (and cloud if "global" exit is used).
+
+            Example:
+                preds = model.forward(x, sigma, exit="local", alpha=[0.5, 0.5])
+        """
+
+        # Initialize batch size and lists to store device outputs and predictions
+        B = x.shape[0]  # Batch size
         hs, predictions = [], []
+
+        # Iterate over each device model to get the output and prediction
         for i, device_model in enumerate(self.device_models):
-            h, prediction = device_model(x[:, i])    # h is the device exit data, dimentions :[32, 16, 14, 9]
+            h, prediction = device_model(x[:, i])  # h: device output, prediction: device prediction
 
-            if isGlobalExit == 1: #global
-                noise = torch.normal(0, std, h.size())  # create a tensor with gausian noises at the same dimentions as prediction                                         # prediction is the prediction per device, dimentions: [32, 10]
-                h = h + noise                  # adding the noise to the device output data
-                                                             # prediction is the prediction per device, dimentions: [32, 10]
+            # Add noise to the device output or prediction based on the exit type (global or local)
+            device_noise_std = torch.sqrt(torch.tensor(sigma[i, i], dtype=torch.float32))
+            if exit == "global":  # Global exit: add noise to the device output
+                noise = torch.normal(0, device_noise_std, h.size())
+                h = h + noise
                 hs.append(h)
                 predictions.append(prediction)
 
-            if isGlobalExit == 0: #local
-                noise = torch.normal(0, std, prediction.size())  # create a tensor with gausian noises at the same dimentions as prediction                                         # prediction is the prediction per device, dimentions: [32, 10]
-                prediction = prediction + noise                  # adding the noise to the device output data
-                                                             # prediction is the prediction per device, dimentions: [32, 10]
+            elif exit == "local":  # Local exit: add noise to the device prediction
+                noise = torch.normal(0, device_noise_std, prediction.size())
+                prediction = prediction + noise
                 hs.append(h)
                 predictions.append(prediction)
 
-
-
-
-        if isGlobalExit == 1: #global exit
-            h = torch.cat(hs, dim=1)  # concatenate the itens in hs to h, dimentions: [32, 96, 14, 9]
-            h = self.cloud_model(h)  # dimentions: [32, 128, 7, 4]
-            h = self.pool(h)  # dimentions: [32, 128, 1, 1]
-            prediction = self.classifier(h.view(B, -1))  # dimentions: [32,10] ; h.view(B, -1) size: [32, 128]
+        # For global exit: pass the concatenated device outputs through the cloud model and classify
+        if exit == "global":
+            h = torch.cat(hs, dim=1)  # Concatenate device outputs
+            h = self.cloud_model(h)  # Cloud model processing
+            h = self.pool(h)  # Apply pooling
+            prediction = self.classifier(h.view(B, -1))  # Classification step
             predictions.append(prediction)
 
-        if isGlobalExit == 0: # local exit
-            if isAvgAgg == 1:
-                probabilities = AVG_aggregation(predictions)
-            if isAvgAgg == 0:
-                probabilities = MAX_aggregation(predictions)
-            predictions.append(probabilities)               # add the cloud prediction as the last item of the array
+        # For local exit: perform weighted aggregation of device predictions
+        elif exit == "local":
+            probabilities = weighted_aggregation(predictions, alpha)  # Weighted aggregation
+            predictions.append(probabilities)
 
+        # Return predictions for both local and global exit cases
         return predictions
 
 
 
 
+def weighted_aggregation(predictions, alpha):
+    """
+        Perform weighted aggregation of predictions from multiple devices using alpha weights.
 
-def AVG_aggregation(predictions):
+        Args:
+            predictions (list of torch.Tensor): Predictions from each device. Shape: [num_devices, B, out_channels]
+            alpha (list or torch.Tensor): Weights for each device. Shape: [num_devices]
+
+        Returns:
+            torch.Tensor: Aggregated class probabilities. Shape: [B, out_channels]
+
+        Example:
+            probs = weighted_aggregation([pred1, pred2], [0.6, 0.4])
+    """
     # Convert predictions to a tensor and exclude cloud prediction
     device_predictions = torch.stack(predictions)  # Shape: [num_devices, B, out_channels]
 
-    # Calculate mean across device predictions
-    avg_predictions = torch.mean(device_predictions, dim=0)  # Mean across devices, Shape: [B, out_channels]
+    # Reshape alpha to match the shape for broadcasting
+    alpha_tensor = torch.tensor(alpha, dtype=device_predictions.dtype, device=device_predictions.device).view(-1, 1,
+                                                                                                              1)  # Shape: [num_devices, 1, 1]
 
-    # Apply softmax to avg_predictions along the last dimension
-    probabilities = F.softmax(avg_predictions, dim=1)  # Shape: [B, out_channels]
+    # Calculate weighted average across device predictions
+    weighted_sum = torch.sum(device_predictions * alpha_tensor,
+                             dim=0)  # Weighted sum across devices, Shape: [B, out_channels]
+    normalization_factor = torch.sum(alpha_tensor, dim=0)  # Normalization factor to ensure weighted avg, Shape: [1, 1]
+
+    # Divide by the normalization factor to get the weighted average
+    weighted_avg_predictions = weighted_sum / normalization_factor  # Shape: [B, out_channels]
+
+    # Apply softmax to weighted_avg_predictions along the last dimension
+    probabilities = F.softmax(weighted_avg_predictions, dim=1)  # Shape: [B, out_channels]
 
     return probabilities
 
+
 def MAX_aggregation(predictions):
+    """
+        Perform MAX aggregation of predictions from multiple devices.
+
+        Args:
+            predictions (list of torch.Tensor): Predictions from each device. Shape: [num_devices, B, out_channels]
+
+        Returns:
+            torch.Tensor: Aggregated class probabilities based on the maximum prediction. Shape: [B, out_channels]
+
+        Example:
+            probs = MAX_aggregation([pred1, pred2])
+    """
     # Convert predictions to a tensor and exclude cloud prediction
     device_predictions = torch.stack(predictions)  # Shape: [num_devices, B, out_channels]
 
@@ -150,3 +201,4 @@ def MAX_aggregation(predictions):
     probabilities = F.softmax(max_predictions, dim=1)  # Shape: [B, out_channels]
 
     return probabilities
+
