@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import pandas as pd
+
 
 
 
@@ -85,7 +87,7 @@ class DDNN(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Linear(128, out_channels) #out_channels = 10
 
-    def forward(self, x, sigma, exit, alpha):
+    def forward(self, x, sigma, exit, alpha, dataset, export_info="no"):
         """
             Forward pass for device and cloud models with noise injection based on the device-specific variance.
 
@@ -124,6 +126,22 @@ class DDNN(nn.Module):
                 hs.append(h)
                 predictions.append(prediction)
 
+            # Write predictions to the CSV file for each sample and class
+            if export_info == "yes":
+                for sample_idx in range(B):
+                    for class_idx in range(prediction.size(1)):  # Assuming prediction has shape [B, num_classes]
+                        # Create a DataFrame for the current sample's prediction
+                        data = {
+                            'Sample': sample_idx,
+                            'Device': i,
+                            'Class': class_idx,
+                            'Prediction': prediction[sample_idx, class_idx].item()
+                        }
+                        df = pd.DataFrame([data])
+
+                        # Write the DataFrame to CSV in append mode
+                        df.to_csv(f"phis_{dataset}.csv", mode='a', header=False, index=False)
+
         # For global exit: pass the concatenated device outputs through the cloud model and classify
         if exit == "global":
             h = torch.cat(hs, dim=1)  # Concatenate device outputs
@@ -134,7 +152,7 @@ class DDNN(nn.Module):
 
         # For local exit: perform weighted aggregation of device predictions
         elif exit == "local":
-            probabilities = weighted_aggregation(predictions, alpha)  # Weighted aggregation
+            probabilities = weighted_aggregation(predictions, alpha, dataset, export_info)  # Weighted aggregation
             predictions.append(probabilities)
 
         # Return predictions for both local and global exit cases
@@ -143,30 +161,30 @@ class DDNN(nn.Module):
 
 
 
-def weighted_aggregation(predictions, alpha):
+def weighted_aggregation(predictions, alpha, dataset, export_info="no"):
     """
-        Perform weighted aggregation of predictions from multiple devices using alpha weights.
+    Perform weighted aggregation of predictions from multiple devices using alpha weights.
 
-        Args:
-            predictions (list of torch.Tensor): Predictions from each device. Shape: [num_devices, B, out_channels]
-            alpha (list or torch.Tensor): Weights for each device. Shape: [num_devices]
+    Args:
+        predictions (list of torch.Tensor): Predictions from each device. Shape: [num_devices, B, out_channels]
+        alpha (list or torch.Tensor): Weights for each device. Shape: [num_devices]
+        dataset (str): The name of the dataset for creating the CSV filename.
+        export_info (str): If "yes", write the probabilities to a CSV file.
 
-        Returns:
-            torch.Tensor: Aggregated class probabilities. Shape: [B, out_channels]
+    Returns:
+        torch.Tensor: Aggregated class probabilities. Shape: [B, out_channels]
 
-        Example:
-            probs = weighted_aggregation([pred1, pred2], [0.6, 0.4])
+    Example:
+        probs = weighted_aggregation([pred1, pred2], [0.6, 0.4], "train_dataset", export_fxs="yes")
     """
     # Convert predictions to a tensor and exclude cloud prediction
     device_predictions = torch.stack(predictions)  # Shape: [num_devices, B, out_channels]
 
     # Reshape alpha to match the shape for broadcasting
-    alpha_tensor = torch.tensor(alpha, dtype=device_predictions.dtype, device=device_predictions.device).view(-1, 1,
-                                                                                                              1)  # Shape: [num_devices, 1, 1]
+    alpha_tensor = torch.tensor(alpha, dtype=device_predictions.dtype, device=device_predictions.device).view(-1, 1, 1)  # Shape: [num_devices, 1, 1]
 
     # Calculate weighted average across device predictions
-    weighted_sum = torch.sum(device_predictions * alpha_tensor,
-                             dim=0)  # Weighted sum across devices, Shape: [B, out_channels]
+    weighted_sum = torch.sum(device_predictions * alpha_tensor, dim=0)  # Weighted sum across devices, Shape: [B, out_channels]
     normalization_factor = torch.sum(alpha_tensor, dim=0)  # Normalization factor to ensure weighted avg, Shape: [1, 1]
 
     # Divide by the normalization factor to get the weighted average
@@ -174,6 +192,17 @@ def weighted_aggregation(predictions, alpha):
 
     # Apply softmax to weighted_avg_predictions along the last dimension
     probabilities = F.softmax(weighted_avg_predictions, dim=1)  # Shape: [B, out_channels]
+
+    # Export probabilities to CSV if export_fxs is enabled
+    if export_info == "yes":
+        # Create the filename for the probabilities
+        prob_filename = f"fxs_{dataset}_prob.csv"
+
+        # Convert probabilities to a DataFrame
+        df_probabilities = pd.DataFrame(probabilities.cpu().detach().numpy())
+
+        # Write the probabilities to the CSV file
+        df_probabilities.to_csv(prob_filename, mode='a', header=False, index=False)
 
     return probabilities
 

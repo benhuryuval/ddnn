@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-def plot_snr_graphs(title, filepath1, label1, filepath2="", label2="", filepath3="", label3="", filepath4="", label4="", skip_rows=0):
+def plot_snr_graphs(title, filepath1, label1, filepath2="", label2="", filepath3="", label3="", filepath4="", label4="", skip_rows=0, x_axis_to_dB="no"):
     """
         Plot SNR (Signal-to-Noise Ratio) vs Accuracy graphs from multiple CSV files on the same graph.
 
@@ -13,45 +13,58 @@ def plot_snr_graphs(title, filepath1, label1, filepath2="", label2="", filepath3
         - filepath1: str, path to the first CSV file.
         - label1: str, the label for the first dataset in the plot.
         - skip_rows: int, number of rows to skip in the CSV file (optional, default is 0).
+        - x_axis_to_dB: str, if "yes" convert SNR to dB on the x-axis (optional, default is "no").
 
         Returns:
         - None.
 
         Usage Example:
-        -     plot_snr_graphs(
-        "Local Exit Accuracy Performances with Noise Covariance Matrix Σ2 on CIFAR10 Dataset Using Different Aggregation Methods",
+        -     "Local Exit Accuracy Performances with Σ2 on CIFAR10 Dataset Using Different Aggregation Methods",
         "local_cifar_equal_noise2.csv", "equal weights (average)",
         "local_cifar_optimal_noise2.csv", "optimal weights",
         "local_cifar_random100_noise2_max_accuracy.csv",
         "random weights - maximum (out of 100 trials)",
         "local_cifar_random100_noise2_average_accuracy.csv",
-        "random weights - average (over 100 trials)")
+        "random weights - average (over 100 trials)", skip_rows=1, x_axis_to_dB="yes")
+
     """
     plt.figure(figsize=(10, 6))
 
+    # Read and plot data for the first CSV file
     data1 = pd.read_csv(filepath1, header=None, names=['snr', 'acc'], skiprows=skip_rows)
     snr1, acc1 = data1['snr'], data1['acc']
+    if x_axis_to_dB == "yes":
+        snr1 = 10 * np.log10(snr1)
     plt.plot(snr1, acc1, marker='x', linestyle='-', color='g', label=label1)
 
+    # Read and plot data for the second CSV file (if provided)
     if filepath2 != "":
         data2 = pd.read_csv(filepath2, header=None, names=['snr', 'acc'], skiprows=skip_rows)
         snr2, acc2 = data2['snr'], data2['acc']
+        if x_axis_to_dB == "yes":
+            snr2 = 10 * np.log10(snr2)
         plt.plot(snr2, acc2, marker='x', linestyle='-', color='r', label=label2)
 
+    # Read and plot data for the third CSV file (if provided)
     if filepath3 != "":
         data3 = pd.read_csv(filepath3, header=None, names=['snr', 'acc'], skiprows=skip_rows)
         snr3, acc3 = data3['snr'], data3['acc']
+        if x_axis_to_dB == "yes":
+            snr3 = 10 * np.log10(snr3)
         plt.plot(snr3, acc3, marker='x', linestyle='-', color='#800080', label=label3)
 
+    # Read and plot data for the fourth CSV file (if provided)
     if filepath4 != "":
         data4 = pd.read_csv(filepath4, header=None, names=['snr', 'acc'], skiprows=skip_rows)
         snr4, acc4 = data4['snr'], data4['acc']
+        if x_axis_to_dB == "yes":
+            snr4 = 10 * np.log10(snr4)
         plt.plot(snr4, acc4, marker='x', linestyle='-', color='b', label=label4)
 
     # Add title and labels
     plt.title(title)
-    plt.xlabel('SNR')
-    plt.ylabel('Accuracy')
+    plt.xlabel('SNR (dB)' if x_axis_to_dB == "yes" else 'SNR')
+    plt.ylabel('Accuracy (%)')
     plt.grid(True)
 
     # Add legend
@@ -61,8 +74,13 @@ def plot_snr_graphs(title, filepath1, label1, filepath2="", label2="", filepath3
     num_ticks_x = len(snr1)
     num_ticks_y = 11
 
-    # Generate evenly spaced ticks for x-axis and y-axis
-    x_ticks = np.linspace(np.floor(snr1[0]), np.floor(snr1[num_ticks_x-1]), num_ticks_x)
+    # Adjust the x_ticks based on whether we are using dB or linear SNR
+    if x_axis_to_dB == "yes":
+        x_ticks = np.linspace(np.floor(min(snr1)), np.ceil(max(snr1)), num_ticks_x)
+    else:
+        x_ticks = np.linspace(snr1[0], snr1[num_ticks_x - 1], num_ticks_x)
+
+    # Generate evenly spaced ticks for y-axis
     y_ticks = np.linspace(0, 100, num_ticks_y)
 
     # Set the ticks on x-axis and y-axis

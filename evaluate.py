@@ -15,26 +15,31 @@ import os
 import matplotlib.pyplot as plt
 
 from grad_descent import get_optimal_alpha
+from info_export import create_fxs_file, reorder_phis_file, adjust_sample_numbering
 from model_settings import define_settings
 from visual_tools import plot_snr_graphs, plot_coefficients
 
-def test_model(model, test_loader, sigma, exit, alpha):
+import torch
+from torch.autograd import Variable
+import torch.nn.functional as F
+from tqdm import tqdm
+import pandas as pd
+
+def test_model(model, test_loader, sigma, exit, alpha, dataset, export_info="no"):
     """
-        Test the performance of the given model with specific noise covariance (sigma), exit strategy, and aggregation weights (alpha).
+    Test the performance of the given model with specific noise covariance (sigma), exit strategy, and aggregation weights (alpha).
 
-        Parameters:
-        - model: PyTorch model to be evaluated.
-        - test_loader: PyTorch DataLoader providing the test dataset.
-        - sigma: Noise covariance matrix to be applied to the model during inference.
-        - exit: Specifies which part of the model to use for early exit or final exit.
-        - alpha: Aggregation weights used by the model for the evaluation (can be optimal, equal, or random depending on the method).
+    Parameters:
+    - model: PyTorch model to be evaluated.
+    - test_loader: PyTorch DataLoader providing the test dataset.
+    - sigma: Noise covariance matrix to be applied to the model during inference.
+    - exit: Specifies which part of the model to use for early exit or final exit.
+    - alpha: Aggregation weights used by the model for the evaluation (can be optimal, equal, or random depending on the method).
+    - dataset: The name of the dataset to be used for generating the filename.
+    - export_info: If "yes", collect info to create fxs and phis.
 
-        Returns:
-        - Accuracy (float): The accuracy of the model on the test dataset, expressed as a percentage.
-
-        Usage Example:
-        -     model, test_loader, num_devices = define_settings(dataset)
-        acc = test_model(model, test_loader, sigma=np.diag([1, 1, 1, 1, 1, 1]), exit="local", alpha=np.ones(num_devices))
+    Returns:
+    - Accuracy (float): The accuracy of the model on the test dataset, expressed as a percentage.
     """
 
     model.eval()  # Set the model to evaluation mode
@@ -48,7 +53,7 @@ def test_model(model, test_loader, sigma, exit, alpha):
         data, target = Variable(data), Variable(target)
 
         # Perform inference with the model using the given sigma, exit, and alpha
-        predictions = model(data, sigma, exit, alpha)
+        predictions = model(data, sigma, exit, alpha, dataset, export_info)
 
         # Use the last prediction (output) for final classification
         last_pred = predictions[-1]  # Dimensions: [batch_size, num_classes], e.g., [32, 10]
@@ -63,20 +68,27 @@ def test_model(model, test_loader, sigma, exit, alpha):
         correct = (pred.view(-1) == target.view(-1)).long().sum().item()
         num_correct += correct  # Accumulate correct predictions
 
+        # Export true labels to CSV if export_fxs is enabled
+        if export_info == "yes":
+            # Convert the true labels from the current batch to a DataFrame
+            df_true_labels = pd.DataFrame({'true_label': target.cpu().numpy()})
+
+            # Write the true labels to the CSV file in append mode
+            df_true_labels.to_csv(f"fxs_{dataset}_true_label.csv", mode='a', header=not bool(num_correct), index=False)
+
     # Calculate and return the accuracy as a percentage
     N = len(test_loader.dataset)  # Total number of samples in the test dataset
     return 100. * (num_correct / N)
 
 
 
-def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out_filepath_csv, plot_graph="yes", snr_values=None):
+def evaluate_snr_performance(exit, alpha_agg_method, noise_cov_mat, out_filepath_csv, plot_graph="yes", snr_values=None):
     """
     Evaluate the performance of a model across different SNR values, using various aggregation strategies for alpha.
     The function writes the accuracy and normalized alpha values (if applicable) to separate CSV files.
 
     Parameters:
     - exit: str, Specifies which part of the model to use for early exit or final exit ('global' or 'local').
-    - dataset: str, The dataset being evaluated ('mnist' or 'cifar').
     - alpha_agg_method: str, Method for computing the alpha values. Can be 'optimal', 'equal', or 'random'.
     - noise_cov_mat: np.array, The noise covariance matrix to apply to the model during inference.
     - out_filepath_csv: str, The file path where the accuracy results will be stored. A separate file will be created for alpha values.
@@ -87,10 +99,10 @@ def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out
     - None. The function writes to CSV files and prints the model's accuracy at each SNR value.
 
     Usage Example:
-    - evaluate_snr_performance(exit='local', dataset='mnist', alpha_agg_method='optimal',
+    - evaluate_snr_performance(exit='local', alpha_agg_method='optimal',
                              noise_cov_mat=np.diag([1, 1, 1, 1, 1, 1]),
                              out_filepath_csv='local_mnist_optimal_noise1.csv')
-    - evaluate_snr_performance(exit="local", dataset="cifar", alpha_agg_method="optimal",
+    - evaluate_snr_performance(exit="local", alpha_agg_method="optimal",
                 noise_cov_mat=np.diag([1, 1, 1, 10, 10, 10]), out_filepath_csv="local_cifar_optimal_noise2.csv")
     """
     # Define constants for cxx values
@@ -98,15 +110,15 @@ def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out
     cxx_local_mnist = 112.82436884928032
     cxx_local_cifar = 32.9801139938582
 
+    alpha = []
+    model, dataset, test_loader, train_loader, num_devices = define_settings()
+
     # default SNR values
     if snr_values is None:
         if dataset == "mnist":
             snr_values = [0.001, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2]
-        elif dataset == "cifar":
+        elif dataset == "cifar10":
             snr_values = [0.001, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3]
-
-    alpha = []
-    model, test_loader, num_devices = define_settings(dataset)
 
     # Create a CSV file for alphas
     alpha_filepath_csv = out_filepath_csv.replace(".csv", "_alphas.csv")
@@ -121,7 +133,7 @@ def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out
             cxx = cxx_global_mnist
         if exit == "local" and dataset == "mnist":
             cxx = cxx_local_mnist
-        if exit == "local" and dataset == "cifar":
+        if exit == "local" and dataset == "cifar10":
             cxx = cxx_local_cifar
 
         sigma = noise_cov_mat * (cxx / (snr * np.trace(noise_cov_mat)))
@@ -136,7 +148,7 @@ def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out
                 f.write(','.join(map(str, normalized_alpha)) + '\n')
 
 
-        acc = test_model(model, test_loader, sigma, exit, alpha)
+        acc = test_model(model, test_loader, sigma, exit, alpha, dataset)
         print('SNR = {:.4f}, ACC = {:.4f}'.format(snr, acc))
         data = [[snr, acc]]
         # Convert the matrix to a Pandas DataFrame
@@ -150,7 +162,7 @@ def evaluate_snr_performance(exit, dataset, alpha_agg_method, noise_cov_mat, out
         plot_snr_graphs(title="SNR vs ACC", filepath1=out_filepath_csv, label1="")
 
 
-def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv, num_iterations, out_filepath_prefix):
+def simulate_random_alphas(exit, noise_cov_mat, compare_performance_csv, num_iterations, out_filepath_prefix):
     """
     Evaluate the performance of a model across different SNR values using random weights for alpha.
     The function saves the maximum accuracy, average accuracy, and the count of iterations exceeding
@@ -158,7 +170,6 @@ def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv
 
     Parameters:
     - exit: str, Specifies which part of the model to use for early exit or final exit ('global' or 'local').
-    - dataset: str, The dataset being evaluated ('mnist' or 'cifar').
     - noise_cov_mat: np.array, The noise covariance matrix to apply to the model during inference.
     - compare_performance_csv: str, The file path of the CSV to compare results against.
     - num_iterations: int, The number of iterations to perform.
@@ -168,15 +179,16 @@ def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv
     - None. The function writes to CSV files containing the performance statistics.
 
     Usage Example:
-    -     simulate_random_alphas(exit="local", dataset="cifar", noise_cov_mat=np.diag([1, 1, 1, 10, 10, 10]),
+    -     simulate_random_alphas(exit="local", noise_cov_mat=np.diag([1, 1, 1, 10, 10, 10]),
                            compare_performance_csv="local_cifar_optimal_noise2.csv",
                            num_iterations=100, out_filepath_prefix="local_cifar_random100_noise2")
     """
     # SNR values (same as in the original function)
+    model, dataset, test_loader, train_loader, num_devices = define_settings()
     snr_values = []
     if dataset == "mnist":
         snr_values = [0.001, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2]
-    elif dataset == "cifar":
+    elif dataset == "cifar10":
         snr_values = [0.001, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3]
 
     max_accuracy = {snr: float('-inf') for snr in snr_values}
@@ -192,7 +204,7 @@ def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv
 
         # Run evaluate_snr_performance with alpha_agg_method="random" and plot_graph="no"
         out_filepath_csv = f"{out_filepath_prefix}_{i}.csv"  # Unique CSV for each iteration
-        evaluate_snr_performance(exit, dataset, "random", noise_cov_mat, out_filepath_csv, plot_graph="no")
+        evaluate_snr_performance(exit, "random", noise_cov_mat, out_filepath_csv, plot_graph="no")
 
         # Read the results from the output CSV file
         results = pd.read_csv(out_filepath_csv, header=None)
@@ -224,20 +236,34 @@ def simulate_random_alphas(exit, dataset, noise_cov_mat, compare_performance_csv
     exceed_count_filepath = out_filepath_prefix + "_exceed_count.csv"
 
     # Save max accuracy
-    pd.DataFrame(max_accuracy.items(), columns=['SNR', 'Max Accuracy']).to_csv(max_acc_filepath, index=False)
+    pd.DataFrame(max_accuracy.items(), columns=['SNR', 'Max Accuracy']).to_csv(max_acc_filepath, index=False, header=False)
     # Save average accuracy
-    pd.DataFrame(average_accuracy.items(), columns=['SNR', 'Average Accuracy']).to_csv(avg_acc_filepath, index=False)
+    pd.DataFrame(average_accuracy.items(), columns=['SNR', 'Average Accuracy']).to_csv(avg_acc_filepath, index=False, header=False)
     # Save exceed count
-    pd.DataFrame(exceed_count.items(), columns=['SNR', 'Exceed Count']).to_csv(exceed_count_filepath, index=False)
+    pd.DataFrame(exceed_count.items(), columns=['SNR', 'Exceed Count']).to_csv(exceed_count_filepath, index=False, header=False)
 
     print(f"Results saved to {max_acc_filepath}, {avg_acc_filepath}, and {exceed_count_filepath}.")
 
+def create_phis_fxs():
+    """
+        Generates 'phis' and 'fxs' files for a given dataset and local exit.
 
+        Parameters:
+        - None
 
+        Outputs:
+        - 'phis' and 'fxs' files: Files containing processed model outputs for each device.
+
+        Example Usage:
+        - create_phis_fxs()
+        """
+    model, dataset, test_loader, train_loader, num_devices = define_settings()
+    test_model(model, train_loader, sigma=np.diag([1, 1, 1, 1, 1, 1]), exit="local", alpha=np.ones(num_devices), dataset=dataset, export_info="yes")
+    create_fxs_file(dataset)
+    reorder_phis_file(dataset)
 
 if __name__ == '__main__':
+    model, dataset, test_loader, train_loader, num_devices = define_settings()
 
-    model, test_loader, num_devices = define_settings(dataset="mnist")
-    acc = test_model(model, test_loader, sigma=np.diag([1, 1, 1, 1, 1, 1]), exit="local", alpha=np.ones(num_devices))
-    print(acc)
+
 

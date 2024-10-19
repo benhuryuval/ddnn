@@ -175,7 +175,7 @@ def get_optimal_alpha(sigma, dataset):
 
         Parameters:
         - sigma: numpy array, the noise covariance matrix.
-        - dataset: str, the dataset to use ('mnist' or 'cifar').
+        - dataset: str, the dataset to use ('mnist' or 'cifar10').
 
         Returns:
         - optimal_alpha: numpy array, the optimal weight vector.
@@ -187,7 +187,7 @@ def get_optimal_alpha(sigma, dataset):
     if dataset == "mnist":
         phis = load_phis('datasets/mnist/phis_mnist.csv')
         f_xs = load_fxs('datasets/mnist/fxs_mnist.csv')
-    elif dataset == "cifar":
+    elif dataset == "cifar10":
         phis = load_phis('datasets/cifar10/phis_cifar.csv')
         f_xs = load_fxs('datasets/cifar10/fxs_cifar.csv')
 
