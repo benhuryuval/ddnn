@@ -22,3 +22,8 @@ This library is dependent on Python 2.7+ and [Chainer](http://chainer.org/). Ple
 ```
 pip install chainer
 ```
+
+## Further Reading
+
+![CRML_PosterTemplate_Tal_Hila](https://github.com/user-attachments/assets/0b03488c-4471-46ec-a637-0efaa0330015)
+
